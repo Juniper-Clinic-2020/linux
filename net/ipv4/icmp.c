@@ -410,6 +410,9 @@ static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 	int code = icmp_param->data.icmph.code;
 
 	printk(KERN_DEBUG "icmp_reply function\n");
+    // if(type == ICMP_EXT_ECHO || type == ICMPV6_EXT_ECHO)
+    //     icmp_param->data.icmph.un.echo.sequence = 0b10;
+
 	if (ip_options_echo(net, &icmp_param->replyopts.opt.opt, skb))
 		return;
 
@@ -964,34 +967,13 @@ static bool icmp_redirect(struct sk_buff *skb)
 static bool icmp_echo(struct sk_buff *skb)
 {
 	struct net *net;
-
-    printk(KERN_DEBUG "icmp_echo function\n");
+	printk(KERN_DEBUG "icmp_echo function\n");
 	net = dev_net(skb_dst(skb)->dev);
 	if (!net->ipv4.sysctl_icmp_echo_ignore_all) {
 		struct icmp_bxm icmp_param;
 
 		icmp_param.data.icmph	   = *icmp_hdr(skb);
 		icmp_param.data.icmph.type = ICMP_ECHOREPLY;
-		icmp_param.skb		   = skb;
-		icmp_param.offset	   = 0;
-		icmp_param.data_len	   = skb->len;
-		icmp_param.head_len	   = sizeof(struct icmphdr);
-		icmp_reply(&icmp_param, skb);
-	}
-	/* should there be an ICMP stat for ignored echos? */
-	return true;
-}
-
-static bool icmp_extended_echo(struct sk_buff *skb)
-{
-	struct net *net;
-	printk(KERN_DEBUG "icmp_extended_echo function\n");
-	net = dev_net(skb_dst(skb)->dev);
-	if (!net->ipv4.sysctl_icmp_echo_ignore_all) {
-		struct icmp_bxm icmp_param;
-
-		icmp_param.data.icmph	   = *icmp_hdr(skb);
-		icmp_param.data.icmph.type = 43; // ICMP4_EXT_ECHO_REPLY
 		icmp_param.skb		   = skb;
 		icmp_param.offset	   = 0;
 		icmp_param.data_len	   = skb->len;
@@ -1056,8 +1038,7 @@ int icmp_rcv(struct sk_buff *skb)
 	struct rtable *rt = skb_rtable(skb);
 	struct net *net = dev_net(rt->dst.dev);
 	bool success;
-
-    printk(KERN_DEBUG "beginning icmp_rcv\n");
+	printk(KERN_DEBUG "beginning icmp_rcv\n");
 	if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
 		struct sec_path *sp = skb_sec_path(skb);
 		int nh;
@@ -1089,30 +1070,29 @@ int icmp_rcv(struct sk_buff *skb)
 	icmph = icmp_hdr(skb);
 
 	ICMPMSGIN_INC_STATS(net, icmph->type);
-	
-    printk(KERN_DEBUG "before icmp_ext_echo check: Type %d\n", icmph->type);
-    /*
-     * Check for PROBE request, and respond
-     */
-    if (icmph->type == 42 || icmph->type == 160) {
-        if(!icmp_extended_echo(skb))
-            goto error;
-    }
 
-    /*
+	printk(KERN_DEBUG "before icmp_ext_echo check: Type %d\n", icmph->type);
+	/*
+	* Check for PROBE request, and respond
+	*/
+	if(icmph->type == ICMP_EXT_ECHO || icmph->type == ICMPV6_EXT_ECHO)
+        goto probe;
+parse:        
+    printk(KERN_DEBUG "Post parse\n");
+	/*
 	 *	18 is the highest 'known' ICMP type. Anything else is a mystery
 	 *
 	 *	RFC 1122: 3.2.2  Unknown ICMP messages types MUST be silently
 	 *		  discarded.
 	 */
-	else if (icmph->type > NR_ICMP_TYPES)
+	if (icmph->type > NR_ICMP_TYPES)
 		goto error;
 
-    printk(KERN_DEBUG "befire parsing icmp message\n");
 
 	/*
 	 *	Parse the ICMP message
 	 */
+	printk(KERN_DEBUG "before parsing icmp message\n");
 
 	if (rt->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST)) {
 		/*
@@ -1133,15 +1113,16 @@ int icmp_rcv(struct sk_buff *skb)
 			goto error;
 		}
 	}
-    
-    printk(KERN_DEBUG "before calling handler\n");
+	printk(KERN_DEBUG "before calling handler\n");
 	success = icmp_pointers[icmph->type].handler(skb);
 
 	if (success)  {
 		consume_skb(skb);
 		return NET_RX_SUCCESS;
 	}
-
+probe:
+    printk(KERN_DEBUG "Made it to probe!\n");
+    goto parse;
 drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;

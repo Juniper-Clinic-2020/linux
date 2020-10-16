@@ -35,7 +35,8 @@
 #define ICMP_ADDRESS		17	/* Address Mask Request		*/
 #define ICMP_ADDRESSREPLY	18	/* Address Mask Reply		*/
 #define NR_ICMP_TYPES		18
-
+#define ICMP_EXT_ECHO		42	/* IPv4 Extended Echo Request   */
+#define ICMP_EXT_ECHOREPLY	43	/* IPv4 Extended Echo Reply	*/
 
 /* Codes for UNREACH. */
 #define ICMP_NET_UNREACH	0	/* Network Unreachable		*/

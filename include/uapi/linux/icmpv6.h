@@ -113,6 +113,9 @@ struct icmp6hdr {
 
 #define ICMPV6_MRDISC_ADV		151
 
+#define ICMPV6_EXT_ECHO			160
+#define ICMPV6_EXT_ECHOREPLY		161
+
 #define ICMPV6_MSG_MAX          255
 
 /*
