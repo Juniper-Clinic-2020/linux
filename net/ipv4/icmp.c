@@ -379,7 +379,6 @@ static void icmp_push_reply(struct icmp_bxm *icmp_param,
 		struct icmphdr *icmph = icmp_hdr(skb);
 		__wsum csum = 0;
 		struct sk_buff *skb1;
-
 		skb_queue_walk(&sk->sk_write_queue, skb1) {
 			csum = csum_add(csum, skb1->csum);
 		}
@@ -388,6 +387,7 @@ static void icmp_push_reply(struct icmp_bxm *icmp_param,
 						 icmp_param->head_len, csum);
 		icmph->checksum = csum_fold(csum);
 		skb->ip_summed = CHECKSUM_NONE;
+        printk(KERN_DEBUG "Pre push pending frames\n");
 		ip_push_pending_frames(sk, fl4);
 	}
 }
@@ -410,12 +410,11 @@ static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 	int code = icmp_param->data.icmph.code;
 
 	printk(KERN_DEBUG "icmp_reply function\n");
-    // if(type == ICMP_EXT_ECHO || type == ICMPV6_EXT_ECHO)
-    //     icmp_param->data.icmph.un.echo.sequence = 0b10;
 
 	if (ip_options_echo(net, &icmp_param->replyopts.opt.opt, skb))
 		return;
 
+    printk(KERN_DEBUG "Passed ip_options_echo\n");
 	/* Needed by both icmp_global_allow and icmp_xmit_lock */
 	local_bh_disable();
 
@@ -428,6 +427,7 @@ static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 		goto out_bh_enable;
 	inet = inet_sk(sk);
 
+    printk(KERN_DEBUG "Passed checks, going to build message\n");
 	icmp_param->data.icmph.checksum = 0;
 
 	ipcm_init(&ipc);
@@ -453,6 +453,7 @@ static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 	rt = ip_route_output_key(net, &fl4);
 	if (IS_ERR(rt))
 		goto out_unlock;
+    printk(KERN_DEBUG "Before calling icmp_push_reply\n");
 	if (icmpv4_xrlim_allow(net, rt, &fl4, type, code))
 		icmp_push_reply(icmp_param, &fl4, &ipc, &rt);
 	ip_rt_put(rt);
@@ -985,6 +986,43 @@ static bool icmp_echo(struct sk_buff *skb)
 }
 
 /*
+ * Handle ICMP_EXT_ECHO ("probe") requests
+ * TODO: Add code to find interface info
+ */
+static bool icmp_ext_echo(struct sk_buff *skb)
+{
+    struct net *net;
+    uint8_t status; // 8 bits of info we send in response
+	printk(KERN_DEBUG "icmp_ext_echo function\n");
+	net = dev_net(skb_dst(skb)->dev);
+    status = 0b110;
+	if (!net->ipv4.sysctl_icmp_echo_ignore_all) {
+		struct icmp_bxm icmp_param;
+
+		icmp_param.data.icmph	   = *icmp_hdr(skb);
+        printk(KERN_DEBUG "skb info\n");
+        printk(KERN_DEBUG "type: %d, code: %d, cksum: %us\n",
+            icmp_param.data.icmph.type, icmp_param.data.icmph.code, icmp_param.data.icmph.checksum);
+        printk(KERN_DEBUG "ext hdr info\n");
+        printk(KERN_DEBUG "version: %x\n", icmp_param.data.times[0]);
+		icmp_param.data.icmph.type = ICMP_EXT_ECHOREPLY;
+        icmp_param.data.icmph.un.echo.sequence &= 0xFF00;
+        icmp_param.data.icmph.un.echo.sequence |= htons(status);
+		icmp_param.skb		   = skb;
+		icmp_param.offset	   = 0;
+		icmp_param.data_len	   = skb->len;
+		icmp_param.head_len	   = sizeof(struct icmphdr);
+        printk(KERN_DEBUG "icmp_param info\n");
+        printk(KERN_DEBUG "type: %d, code: %d, offset: %d, datalen: %d, headlen: %d\n",
+            icmp_param.data.icmph.type, icmp_param.data.icmph.code, icmp_param.offset, icmp_param.data_len
+            ,icmp_param.head_len);
+		icmp_reply(&icmp_param, skb);
+	}
+	/* should there be an ICMP stat for ignored echos? */
+	return true;
+}
+
+/*
  *	Handle ICMP Timestamp requests.
  *	RFC 1122: 3.2.2.8 MAY implement ICMP timestamp requests.
  *		  SHOULD be in the kernel for minimum random latency.
@@ -1071,16 +1109,15 @@ int icmp_rcv(struct sk_buff *skb)
 
 	ICMPMSGIN_INC_STATS(net, icmph->type);
 
-	printk(KERN_DEBUG "before icmp_ext_echo check: Type %d\n", icmph->type);
-	/*
-	* Check for PROBE request, and respond
-	*/
-	if(icmph->type == ICMP_EXT_ECHO || icmph->type == ICMPV6_EXT_ECHO)
+    /*
+     * Check for ICMP Extended Echo ("probe") messages
+     */
+    if (icmph->type == ICMP_EXT_ECHO || icmph->type == ICMPV6_EXT_ECHO)
         goto probe;
-parse:        
-    printk(KERN_DEBUG "Post parse\n");
+
 	/*
-	 *	18 is the highest 'known' ICMP type. Anything else is a mystery
+	 *	Only 'known' ICMP types higher than 18 are ICMP Extended Echo ("probe") messages 
+     *  Anything else is a mystery
 	 *
 	 *	RFC 1122: 3.2.2  Unknown ICMP messages types MUST be silently
 	 *		  discarded.
@@ -1092,7 +1129,7 @@ parse:
 	/*
 	 *	Parse the ICMP message
 	 */
-	printk(KERN_DEBUG "before parsing icmp message\n");
+    printk(KERN_DEBUG "Made it past error check, rt_flags: %d\n", rt->rt_flags);
 
 	if (rt->rt_flags & (RTCF_BROADCAST | RTCF_MULTICAST)) {
 		/*
@@ -1113,16 +1150,17 @@ parse:
 			goto error;
 		}
 	}
-	printk(KERN_DEBUG "before calling handler\n");
-	success = icmp_pointers[icmph->type].handler(skb);
 
+	success = icmp_pointers[icmph->type].handler(skb);
+success_check:
 	if (success)  {
 		consume_skb(skb);
 		return NET_RX_SUCCESS;
 	}
 probe:
-    printk(KERN_DEBUG "Made it to probe!\n");
-    goto parse;
+    printk(KERN_DEBUG "Before calling icmp_ext_echo\n");
+    success = icmp_ext_echo(skb);
+    goto success_check;
 drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;
