@@ -93,6 +93,11 @@
 #include <net/ip_fib.h>
 #include <net/l3mdev.h>
 
+
+#define ICMP_EXT_MAL_QUERY 1
+#define ICMP_EXT_NO_IF 2
+#define ICMP_EXT_MULT_IF_SATISFY 4
+
 /*
  *	Build xmit assembly blocks
  */
@@ -987,40 +992,269 @@ static bool icmp_echo(struct sk_buff *skb)
 
 /*
  * Handle ICMP_EXT_ECHO ("probe") requests
- * TODO: Add code to find interface info
  */
 static bool icmp_ext_echo(struct sk_buff *skb)
 {
-    struct net *net;
+	struct net *net;
+    struct icmp_bxm icmp_param;
+    struct net_device *dev;
+    struct net_device *probed_dev;
+    struct in_ifaddr *if_info;
+    char *ctype;
     uint8_t status; // 8 bits of info we send in response
+    uint8_t *id_start;
+    uint16_t addrlen;
+    status = 0;
+    ctype = (char *)(skb->data);
+    ctype += 7;
+    if_info = NULL;
+    probed_dev = NULL;
+
+
 	printk(KERN_DEBUG "icmp_ext_echo function\n");
 	net = dev_net(skb_dst(skb)->dev);
-    status = 0b110;
 	if (!net->ipv4.sysctl_icmp_echo_ignore_all) {
-		struct icmp_bxm icmp_param;
 
 		icmp_param.data.icmph	   = *icmp_hdr(skb);
-        printk(KERN_DEBUG "skb info\n");
-        printk(KERN_DEBUG "type: %d, code: %d, cksum: %us\n",
-            icmp_param.data.icmph.type, icmp_param.data.icmph.code, icmp_param.data.icmph.checksum);
-        printk(KERN_DEBUG "ext hdr info\n");
-        printk(KERN_DEBUG "version: %x\n", icmp_param.data.times[0]);
 		icmp_param.data.icmph.type = ICMP_EXT_ECHOREPLY;
-        icmp_param.data.icmph.un.echo.sequence &= 0xFF00;
-        icmp_param.data.icmph.un.echo.sequence |= htons(status);
+        icmp_param.data.icmph.un.echo.sequence &= htons(0xFF00);
 		icmp_param.skb		   = skb;
 		icmp_param.offset	   = 0;
 		icmp_param.data_len	   = skb->len;
 		icmp_param.head_len	   = sizeof(struct icmphdr);
-        printk(KERN_DEBUG "icmp_param info\n");
-        printk(KERN_DEBUG "type: %d, code: %d, offset: %d, datalen: %d, headlen: %d\n",
-            icmp_param.data.icmph.type, icmp_param.data.icmph.code, icmp_param.offset, icmp_param.data_len
-            ,icmp_param.head_len);
-		icmp_reply(&icmp_param, skb);
 	}
+
+    /* Fill out extended echo reply */
+    // id_start = (uint8_t *)(ctype + 5);
+    // printk(KERN_DEBUG "ifindex = %d\n", *id_start);
+    // printk(KERN_DEBUG "ifindex ntohl = %d\n", ntohl(*id_start));
+
+    id_start = (uint8_t *)(skb->data + 8);
+    // printk(KERN_DEBUG "id_start as decimal = %d\n", *((uint32_t *)id_start)));
+    id_start = (uint8_t *)(skb->data + 8);
+
+    addrlen = *(ctype - 2) - 4;
+    printk(KERN_DEBUG "addrlen = %d\n", addrlen);
+    if(*ctype == 1) {
+        printk(KERN_DEBUG "c-type - 1: Name\n");
+        printk(KERN_DEBUG "id_start as string = %s\n", (char *)id_start);
+    }
+    else if(*ctype == 2) {
+        printk(KERN_DEBUG "c-type - 2: Index\n");
+        printk(KERN_DEBUG "id_start as ntohl decimal = %d\n", ntohl(*((uint32_t *)id_start)));
+    }
+    else if(*ctype == 3) {
+        printk(KERN_DEBUG "c-type - 3: Address\n");
+        printk(KERN_DEBUG "id_start as addr = %x\n", *((uint32_t *)(id_start + 4)));
+
+    }
+    else {
+        printk(KERN_DEBUG "Something's very wrong\n");
+        icmp_param.data.icmph.code = ICMP_EXT_MAL_QUERY;
+        goto send_reply;
+    }
+	
+    dev = first_net_device(net);
+    dev_put(dev);
+    while (dev != NULL) {
+        printk(KERN_DEBUG "net_dev ifindex: %d\n", dev->ifindex);
+        printk(KERN_DEBUG "net_dev name: %s\n", dev->name);
+        printk(KERN_DEBUG "net_dev flags: %x\n", dev->flags);
+        if(*ctype == 1) {
+            if(strcmp(dev->name, (char *)id_start) == 0) {
+                printk(KERN_DEBUG "Found match name %s\n", dev->name);
+                if(probed_dev != NULL) {
+                    icmp_param.data.icmph.code = ICMP_EXT_MULT_IF_SATISFY;
+                    goto send_reply;
+                }
+                probed_dev = dev;
+            }
+        }
+        else if(*ctype == 2) {
+            if(ntohl(*((uint32_t *)id_start)) == dev->ifindex) {
+                printk(KERN_DEBUG "Found match ifindex %d\n", dev->ifindex);
+                if(probed_dev != NULL) {
+                    icmp_param.data.icmph.code = ICMP_EXT_MULT_IF_SATISFY;
+                    goto send_reply;
+                }                
+                probed_dev = dev;
+            }
+        }
+        else {
+            if_info = dev->ip_ptr->ifa_list;
+            while(if_info != NULL) {
+                printk(KERN_DEBUG "ip addr: %x\n", if_info->ifa_address);
+                if(if_info->ifa_address == *((uint32_t *)(id_start + 4))) {
+                    if(probed_dev != NULL) {
+                        // return false;
+                        icmp_param.data.icmph.code = ICMP_EXT_MULT_IF_SATISFY;
+                        goto send_reply;
+                    }
+                    printk(KERN_DEBUG "Found match address %x\n", if_info->ifa_address);
+                    probed_dev = dev;
+                    break;
+                }
+                if_info = if_info->ifa_next;
+            }
+        }
+        dev = next_net_device(dev);
+    }
+    printk(KERN_DEBUG "Past while loop\n");
+
+    if(probed_dev == NULL) {
+        printk(KERN_DEBUG "probed_dev == null\n");
+        // return false;
+        icmp_param.data.icmph.code = ICMP_EXT_NO_IF;
+        goto send_reply;
+    }
+
+    status |= (probed_dev->flags & IFF_UP) << 2;
+    status |= 1 << 1;
+    // if_info = probed_dev->ip_ptr->ifa_list;
+
+    // while(if_info != NULL) {
+    //     printk(KERN_DEBUG "if_info->ifa_label = %s\n", if_info->ifa_label);
+    //     printk(KERN_DEBUG "if_info->ifa_address = %x\n", ntohl(if_info->ifa_address));
+    //     if_info = if_info->ifa_next;
+    // }
+
+
+    icmp_param.data.icmph.un.echo.sequence |= htons(status);
+    
 	/* should there be an ICMP stat for ignored echos? */
+send_reply:
+    icmp_reply(&icmp_param, skb);
 	return true;
 }
+
+// static bool icmp_ext_echo(struct sk_buff *skb)
+// {
+// 	struct net *net;
+//     struct icmp_bxm icmp_param;
+//     struct net_device *dev;
+//     struct net_device *probed_dev;
+//     struct in_ifaddr *if_info;
+//     char *ctype;
+//     uint8_t status; // 8 bits of info we send in response
+//     uint8_t *id_start;
+//     uint16_t addrlen;
+//     status = 0;
+//     ctype = (char *)(skb->data);
+//     ctype += 7;
+//     if_info = NULL;
+//     probed_dev = NULL;
+
+
+// 	printk(KERN_DEBUG "icmp_ext_echo function\n");
+// 	net = dev_net(skb_dst(skb)->dev);
+// 	if (!net->ipv4.sysctl_icmp_echo_ignore_all) {
+
+// 		icmp_param.data.icmph	   = *icmp_hdr(skb);
+// 		icmp_param.data.icmph.type = ICMP_EXT_ECHOREPLY;
+//         icmp_param.data.icmph.un.echo.sequence &= 0xFF00;
+//         status = 0b110;
+//         icmp_param.data.icmph.un.echo.sequence |= htons(status);
+// 		icmp_param.skb		   = skb;
+// 		icmp_param.offset	   = 0;
+// 		icmp_param.data_len	   = skb->len;
+// 		icmp_param.head_len	   = sizeof(struct icmphdr);
+// 	}
+
+//     /* Fill out extended echo reply */
+//     // id_start = (uint8_t *)(ctype + 5);
+//     // printk(KERN_DEBUG "ifindex = %d\n", *id_start);
+//     // printk(KERN_DEBUG "ifindex ntohl = %d\n", ntohl(*id_start));
+
+//     id_start = (uint8_t *)(ctype + 4);
+//     printk(KERN_DEBUG "ifindex = %d\n", *id_start);
+//     printk(KERN_DEBUG "ifindex ntohl = %d\n", ntohl(*id_start));
+//     addrlen = *(ctype - 2);
+//     printk(KERN_DEBUG "addrlen = %d\n", addrlen);
+//     if(*ctype == 1) printk(KERN_DEBUG "Ctype - 1: Name\n");
+//     else if(*ctype == 2) {
+//         printk(KERN_DEBUG "Ctype - 2: Index\n");
+//     }
+//     else if(*ctype == 3) {
+//         printk(KERN_DEBUG "Ctype - 3: Address\n");
+//     }
+//     else {
+//         printk(KERN_DEBUG "Something's very wrong\n");
+//         icmp_param.data.icmph.code = ICMP_EXT_MAL_QUERY;
+//         goto send_reply;
+//     }
+	
+//     dev = first_net_device(net);
+//     dev_put(dev);
+//     while (dev != NULL) {
+//         printk(KERN_DEBUG "net_dev ifindex: %d\n", dev->ifindex);
+//         printk(KERN_DEBUG "net_dev name: %s\n", dev->name);
+//         printk(KERN_DEBUG "net_dev flags: %x\n", dev->flags);
+//         // if(*ctype == 1) {
+//         //     if(strcmp(dev->name, (char *)id_start) == 0) {
+//         //         printk(KERN_DEBUG "Found match %s\n", dev->name);
+//         //         if(probed_dev != NULL) {
+//         //             printk(KERN_DEBUG "returning false\n");
+//         //             return false;
+//         //             // icmp_param.data.icmph.code = ICMP_EXT_MULT_IF_SATISFY;
+//         //             // goto send_reply;
+//         //         }
+//         //         probed_dev = dev;
+//         //     }
+//         // }
+//         // else if(*ctype == 2) {
+//         //     if(*id_start == dev->ifindex) {
+//         //         printk(KERN_DEBUG "Found match %d\n", dev->ifindex);
+//         //         if(probed_dev != NULL) {
+//         //             printk(KERN_DEBUG "returning false\n");
+//         //             return false;
+//         //             // icmp_param.data.icmph.code = ICMP_EXT_MULT_IF_SATISFY;
+//         //             // goto send_reply;
+//         //         }                
+//         //         probed_dev = dev;
+//         //     }
+//         // }
+//         // else {
+//         //     printk(KERN_DEBUG "ctype == 3 in while loop\n");
+//         //     if_info = dev->ip_ptr->ifa_list;
+//         //     while(if_info != NULL) {
+//         //         if(if_info->ifa_address == *((uint32_t *)(id_start))) {
+//         //             if(probed_dev != NULL) {
+//         //                 return false;
+//         //                 // icmp_param.data.icmph.code = ICMP_EXT_MULT_IF_SATISFY;
+//         //                 // goto send_reply;
+//         //             }
+//         //             printk(KERN_DEBUG "Found match %x\n", if_info->ifa_address);
+//         //             probed_dev = dev;
+//         //             break;
+//         //         }
+//         //         if_info = if_info->ifa_next;
+//         //     }
+//         // }
+//         dev = next_net_device(dev);
+//     }
+//     printk(KERN_DEBUG "Past while loop\n");
+// //     if(probed_dev == NULL) {
+// //         printk(KERN_DEBUG "probed_dev == null\n");
+// //         return false;
+// //         // icmp_param.data.icmph.code = ICMP_EXT_NO_IF;
+// //         // goto send_reply;
+// //     }
+
+// //     status = (dev->flags & IFF_UP) << 2;
+// //     if_info = dev->ip_ptr->ifa_list;
+
+//     // while(if_info != NULL) {
+//     //     printk(KERN_DEBUG "if_info->ifa_label = %s\n", if_info->ifa_label);
+//     //     printk(KERN_DEBUG "if_info->ifa_address = %x\n", ntohl(if_info->ifa_address));
+//     //     if_info = if_info->ifa_next;
+//     // }
+
+
+// 	/* should there be an ICMP stat for ignored echos? */
+// send_reply:
+//     icmp_reply(&icmp_param, skb);
+// 	return true;
+// }
 
 /*
  *	Handle ICMP Timestamp requests.
@@ -1157,10 +1391,6 @@ success_check:
 		consume_skb(skb);
 		return NET_RX_SUCCESS;
 	}
-probe:
-    printk(KERN_DEBUG "Before calling icmp_ext_echo\n");
-    success = icmp_ext_echo(skb);
-    goto success_check;
 drop:
 	kfree_skb(skb);
 	return NET_RX_DROP;
@@ -1169,6 +1399,10 @@ csum_error:
 error:
 	__ICMP_INC_STATS(net, ICMP_MIB_INERRORS);
 	goto drop;
+probe:
+    printk(KERN_DEBUG "Before calling icmp_ext_echo\n");
+    success = icmp_ext_echo(skb);
+    goto success_check;
 }
 
 static bool ip_icmp_error_rfc4884_validate(const struct sk_buff *skb, int off)
