@@ -68,6 +68,12 @@
 #define ICMP_EXC_FRAGTIME	1	/* Fragment Reass time exceeded	*/
 
 
+/* Codes for ICMP_EXT_ECHO */
+#define ICMP_EXT_MAL_QUERY  1   /* Malformed Query */
+#define ICMP_EXT_NO_IF      2   /* No such Interface */
+#define ICMP_EXT_NO_TABLE_ENT       3   /* No such Table Entry */
+#define ICMP_EXT_MULT_IFS_SATISFY   4   /* Multiple Interfaces Satisfy Query */
+
 struct icmphdr {
   __u8		type;
   __u8		code;
@@ -114,9 +120,16 @@ struct icmp_ext_hdr {
 
 /* RFC 4884 extension object header: one for each object */
 struct icmp_extobj_hdr {
-	__be16		length;
+	__u16		length;
 	__u8		class_num;
 	__u8		class_type;
+};
+
+/* RFC 8335: 2.1 Header for C-type 3 payload */
+struct icmp_ext_ctype3hdr {
+    __u16      afi;
+    __u8        addrlen;
+    __u8        reserved;
 };
 
 #endif /* _UAPI_LINUX_ICMP_H */
